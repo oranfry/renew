@@ -1,0 +1,279 @@
+#!/bin/bash
+
+CONF_ROOT=
+DEFAULT_CONF_ROOT=/etc/nginx
+DEFAULT_EMAIL=
+EXPAND=
+FORCE=
+FORCE_ONE=
+INVALID=
+MODE=nginx
+PERIOD=2160000
+SILENT=
+SUFFIX=
+VERBOSE=
+
+while getopts "ac:de:fno:p:rsvx:" opt; do
+    case $opt in
+        a )
+            MODE=apache2
+            DEFAULT_CONF_ROOT=/etc/apache2
+            ;;
+        c )
+            CONF_ROOT="$OPTARG"
+            ;;
+        d )
+            DRYRUN=1
+            ;;
+        e )
+            DEFAULT_EMAIL="$OPTARG"
+            ;;
+        f )
+            FORCE=1
+            ;;
+        n )
+            MODE=nginx
+            DEFAULT_CONF_ROOT=/etc/nginx
+            ;;
+        o )
+            FORCE_ONE="$OPTARG"
+            ;;
+        p )
+            PERIOD="$OPTARG"
+            ;;
+        r )
+            EXPAND=" --expand"
+            ;;
+        s )
+            SILENT=1
+            ;;
+        v )
+            VERBOSE=1
+            ;;
+        x )
+            SUFFIX="$OPTARG"
+            ;;
+        \? )
+            /usr/bin/echo "Error: invalid option: $OPTARG" 1>&2
+            INVALID=1
+            ;;
+    esac
+done
+
+if /usr/bin/test -n "$INVALID"; then
+    exit 1
+fi
+
+shift $((OPTIND -1))
+
+if /usr/bin/test -z "$CONF_ROOT"; then
+    CONF_ROOT="$DEFAULT_CONF_ROOT"
+fi
+
+if /usr/bin/test ! -d $CONF_ROOT/sites-available -o ! -d $CONF_ROOT/sites-enabled; then
+    /usr/bin/echo "Error: could not find directories [$CONF_ROOT/sites-available] and [$CONF_ROOT/sites-enabled]" 1>&2
+
+    exit 1
+fi
+
+if /usr/bin/test -n "$SILENT"; then
+    exec >/dev/null
+fi
+
+if /usr/bin/test -n "$EXPAND" -a -z "$FORCE_ONE"; then
+    /usr/bin/echo "Error: can't expand all certificates. Please use -o with -r." 1>&2
+
+    exit 1
+fi
+
+TMP="$(/usr/bin/mktemp -d)"
+trap 'rm -rf -- "$TMP"' EXIT
+
+while read vhost; do
+    if /usr/bin/test -n "$VERBOSE"; then
+        /usr/bin/echo -n "Checking $vhost..."
+    fi
+
+    if /usr/bin/test -n "$FORCE_ONE" -a "$FORCE_ONE" != "$vhost"; then
+        if /usr/bin/test -n "$VERBOSE"; then
+            /usr/bin/echo "not $FORCE_ONE"
+        fi
+
+        continue
+    fi
+
+    AVAILABLE_FILE="$CONF_ROOT/sites-available/$vhost"
+    ENABLED_FILE="$CONF_ROOT/sites-enabled/$vhost"
+    LINK_PATH="../sites-available/$vhost"
+
+    if /usr/bin/test -z "$(/usr/bin/cat "$AVAILABLE_FILE" | /usr/bin/grep '#\s*renew_conf')"; then
+        if /usr/bin/test -n "$VERBOSE"; then
+            /usr/bin/echo "not configured"
+        fi
+
+        continue
+    fi
+
+    # load config
+
+    CONFIG_FILE="$TMP/$vhost.config"
+
+    /usr/bin/cat "$AVAILABLE_FILE" | /usr/bin/grep '#\s*renew_conf' | /usr/bin/sed 's/^#\s*renew_conf\s\+//' > "$CONFIG_FILE"
+
+    domain_lines=()
+
+    while read line; do
+        domain_lines+=($line)
+    done < <(/usr/bin/cat "$CONFIG_FILE" | /usr/bin/grep '^domain\s\+' | /usr/bin/sed 's/^domain\s\+//')
+
+    domains=(${domain_lines[@]})
+    main=${domains[0]}
+    alts=(${domains[@]:1})
+
+    email="$(/usr/bin/cat "$CONFIG_FILE" | /usr/bin/grep '^email\s\+' | /usr/bin/head -n 1 | /usr/bin/sed 's/^email\s\+//' | /usr/bin/tr -d '\n')"
+
+    if /usr/bin/test -z "$email" -a -n "$DEFAULT_EMAIL"; then
+        email="$DEFAULT_EMAIL"
+    fi
+
+    POST_RENEW_SCRIPT="$TMP/$vhost.post_renew"
+    /usr/bin/cat "$CONFIG_FILE" | /usr/bin/grep '^post_renew\s\+' | /usr/bin/sed 's/^post_renew\s\+//' > "$POST_RENEW_SCRIPT"
+
+    ENABLED=
+
+    if /usr/bin/test -h "$ENABLED_FILE"; then
+        ENABLED=1
+
+        if /usr/bin/test "$(/usr/bin/readlink "$ENABLED_FILE")" != "$LINK_PATH"; then
+            if /usr/bin/test -n "$VERBOSE"; then
+                /usr/bin/echo "invalid"
+            fi
+
+            /usr/bin/echo "Error: $vhost: not linked as expected" 1>&2
+
+            continue
+        fi
+    fi
+
+    if /usr/bin/test -z "$main"; then
+        if /usr/bin/test -n "$VERBOSE"; then
+            /usr/bin/echo "invalid"
+        fi
+
+        /usr/bin/echo "Error: $vhost: no domain is configured. Example config:" 1>&2
+        /usr/bin/echo "# renew_conf domain www.example.com" 1>&2
+
+        continue
+    fi
+
+    if /usr/bin/test -z "$email"; then
+        if /usr/bin/test -n "$VERBOSE"; then
+            /usr/bin/echo "invalid"
+        fi
+
+        /usr/bin/echo "Error: $vhost: no email address is configured. Example config:" 1>&2
+        /usr/bin/echo "# renew_conf email info@example.com" 1>&2
+
+        continue
+    fi
+
+    if /usr/bin/test "$main$SUFFIX" != "$vhost"; then
+        if /usr/bin/test -n "$VERBOSE"; then
+            /usr/bin/echo "invalid"
+        fi
+
+        /usr/bin/echo "Error: $vhost: does not accord with its first configured domain [$main]" 1>&2
+
+        continue
+    fi
+
+    if /usr/bin/test -n "$VERBOSE"; then
+        /usr/bin/echo "valid"
+        /usr/bin/echo
+        /usr/bin/echo "    Raw config:"
+        /usr/bin/cat "$CONFIG_FILE" | /usr/bin/sed 's/^/        /'
+        /usr/bin/echo
+        /usr/bin/echo "    Parsed config:"
+        /usr/bin/echo "        domains:    $(for _v in "${domains[@]}"; do /usr/bin/echo -n "[$_v] "; done)"
+        /usr/bin/echo "        email:      [$email]"
+        /usr/bin/echo -n "        post_renew: "
+        /usr/bin/test -s "$POST_RENEW_SCRIPT" && /usr/bin/head -n 1 "$POST_RENEW_SCRIPT" || /usr/bin/echo
+        /usr/bin/cat "$POST_RENEW_SCRIPT" | /usr/bin/tail -n +2 | /usr/bin/sed 's/^/                    /'
+        /usr/bin/echo
+    fi
+
+    if /usr/bin/test -n "$FORCE" || ! /usr/bin/openssl x509 -checkend "$PERIOD" -noout -in /etc/letsencrypt/live/$main/cert.pem &>/dev/null; then
+        /usr/bin/echo "Refreshing $vhost"
+
+        /usr/bin/rm -f "$ENABLED_FILE"
+
+        (
+            if /usr/bin/test "$MODE" == "apache2"; then
+                /usr/bin/echo "<VirtualHost *:80>
+    ServerName $main
+    ServerAlias ${alts[@]}
+    DocumentRoot /var/www/certbot
+    DirectoryIndex index.html
+</VirtualHost>
+"
+            else # nginx mode
+                /usr/bin/echo "server {
+    listen 80;
+    listen [::]:80;
+
+    server_name ${domains[@]};
+
+    root /var/www/certbot;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}"
+            fi
+        ) > "$ENABLED_FILE"
+
+        if /usr/bin/test -n "$VERBOSE"; then
+            /usr/bin/echo
+            /usr/bin/echo "    Temporary vhost:"
+            /usr/bin/cat "$ENABLED_FILE" | /usr/bin/sed 's/^/        /'
+            /usr/bin/echo
+        fi
+
+        if /usr/bin/test -z "$DRYRUN"; then
+            /usr/sbin/service $MODE restart
+            /usr/bin/sleep 3
+            RENEW_COMMAND="/snap/bin/certbot certonly$EXPAND --non-interactive --webroot --agree-tos --email '$email' $(for d in "${domains[@]}"; do /usr/bin/echo -d $d; done) -w /var/www/certbot"
+            echo $RENEW_COMMAND
+            $RENEW_COMMAND
+        else
+            /usr/bin/echo 'dryrun: skipping certbot execution'
+        fi
+
+        /usr/bin/rm "$ENABLED_FILE"
+
+        if /usr/bin/test -n "$ENABLED"; then
+            /usr/bin/ln -s "$LINK_PATH" "$ENABLED_FILE"
+        fi
+
+        if /usr/bin/test -z "$DRYRUN"; then
+            /usr/sbin/service $MODE restart
+            /usr/bin/sleep 3
+        fi
+
+        if /usr/bin/test -s "$POST_RENEW_SCRIPT"; then
+            if /usr/bin/test -z "$DRYRUN"; then
+                if /usr/bin/test -n "$VERBOSE"; then
+                    /usr/bin/echo "    Running post_renew"
+                fi
+
+                /bin/bash "$POST_RENEW_SCRIPT"
+            else
+                /usr/bin/echo 'dryrun: skipping post_renew execution'
+            fi
+        fi
+    elif /usr/bin/test -n "$VERBOSE"; then
+        /usr/bin/echo "    Cerificate not due for renewal, skipping."
+        /usr/bin/echo
+    fi
+done < <(/usr/bin/ls -1 "$CONF_ROOT/sites-available")

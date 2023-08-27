@@ -240,11 +240,12 @@ while read vhost; do
             /usr/bin/echo
         fi
 
+        RENEW_COMMAND="/snap/bin/certbot certonly$EXPAND --non-interactive --webroot --agree-tos --email '$email' $(for d in "${domains[@]}"; do /usr/bin/echo -d $d; done) -w /var/www/certbot"
+        echo $RENEW_COMMAND
+
         if /usr/bin/test -z "$DRYRUN"; then
             /usr/sbin/service $MODE restart
             /usr/bin/sleep 3
-            RENEW_COMMAND="/snap/bin/certbot certonly$EXPAND --non-interactive --webroot --agree-tos --email '$email' $(for d in "${domains[@]}"; do /usr/bin/echo -d $d; done) -w /var/www/certbot"
-            echo $RENEW_COMMAND
             $RENEW_COMMAND
         else
             /usr/bin/echo 'dryrun: skipping certbot execution'
